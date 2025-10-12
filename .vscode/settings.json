@@ -1,0 +1,21 @@
+{
+  "C_Cpp.intelliSenseEngine": "default",
+  "idf.espIdfPathWin": "c:\\Espressif\\frameworks\\esp-idf-v5.5.1",
+  "idf.toolsPathWin": "c:\\Espressif\\VSCodeExt",
+  "idf.pythonInstallPath": "c:\\Espressif\\VSCodeExt\\tools\\idf-python\\3.11.2\\python.exe",
+  "idf.openOcdConfigs": [
+    "board/esp32c6-builtin.cfg"
+  ],
+  "idf.portWin": "COM8",
+  "idf.flashType": "UART",
+  "files.associations": {
+    "led_strip_interface.h": "c",
+    "led_strip.h": "c",
+    "light_driver.h": "c",
+    "esp_zigbee_core.h": "c",
+    "app_main.h": "c",
+    "zcl_utility.h": "c",
+    "esp_zigbee_ha_standard.h": "c",
+    "zigbee_app.h": "c"
+  }
+}

@@ -1,0 +1,3 @@
+
+
+void onDeviceReboted(void);
