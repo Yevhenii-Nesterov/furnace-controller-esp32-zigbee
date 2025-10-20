@@ -8,9 +8,11 @@
 #include "./common.h"
 #include "led_driver.h"
 
-#if !defined ZB_ED_ROLE
-#error Define ZB_ED_ROLE in idf.py menuconfig to compile light (End Device) source code.
+#if !defined CONFIG_ZB_ZCZR
+#error Define ZB_ZCZR in idf.py menuconfig to compile light (Router) source code.
 #endif
+
+#define MULTISTATE_DEFAULT_STATE_VALUE 0
 
 static const char *TAG = "ZB_APP";
 
@@ -39,6 +41,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
             {
                 ESP_LOGI(TAG, "Start network steering");
                 esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
+                led_driver_set_state(LED_DRV_CONNECTING);
             }
             else
             {
@@ -49,6 +52,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
         {
             /* commissioning failed */
             ESP_LOGW(TAG, "Failed to initialize Zigbee stack (status: %s)", esp_err_to_name(err_status));
+            led_driver_set_state(LED_DRV_ERROR);
         }
         if (ESP_ZB_BDB_SIGNAL_DEVICE_REBOOT == sig_type)
         {
@@ -64,6 +68,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
                      extended_pan_id[7], extended_pan_id[6], extended_pan_id[5], extended_pan_id[4],
                      extended_pan_id[3], extended_pan_id[2], extended_pan_id[1], extended_pan_id[0],
                      esp_zb_get_pan_id(), esp_zb_get_current_channel(), esp_zb_get_short_address());
+            led_driver_set_state(LED_DRV_NONE);
         }
         else
         {
@@ -88,15 +93,20 @@ static esp_err_t zb_attribute_handler(const esp_zb_zcl_set_attr_value_message_t 
                         message->info.status);
     ESP_LOGI(TAG, "Received message: endpoint(%d), cluster(0x%x), attribute(0x%x), data size(%d)", message->info.dst_endpoint, message->info.cluster,
              message->attribute.id, message->attribute.data.size);
-    if (message->info.dst_endpoint == HA_ESP_LIGHT_ENDPOINT)
+    if (message->info.dst_endpoint == HVAC_ENDPOINT)
     {
-        if (message->info.cluster == ESP_ZB_ZCL_CLUSTER_ID_ON_OFF)
+        if (message->info.cluster == ESP_ZB_ZCL_CLUSTER_ID_MULTI_OUTPUT)
         {
-            if (message->attribute.id == ESP_ZB_ZCL_ATTR_ON_OFF_ON_OFF_ID && message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_BOOL)
+            if (message->attribute.id == ESP_ZB_ZCL_ATTR_MULTI_OUTPUT_PRESENT_VALUE_ID && (message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U16 || message->attribute.data.type == ESP_ZB_ZCL_ATTR_TYPE_U8))
             {
+
+                ESP_LOGI(TAG, "Data type 0x%x", message->attribute.data.type);
+
+                /*
                 light_state = message->attribute.data.value ? *(bool *)message->attribute.data.value : light_state;
                 ESP_LOGI(TAG, "Light sets to %s", light_state ? "On" : "Off");
                 led_driver_set_state(light_state ? IDLE : NONE);
+                */
             }
         }
     }
@@ -118,20 +128,87 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
     return ret;
 }
 
+void reset_multi_output_present_value_attribute()
+{
+    // Acquire Zigbee stack lock before modifying attributes
+    esp_zb_lock_acquire(portMAX_DELAY);
+
+    float default_state = MULTISTATE_DEFAULT_STATE_VALUE;
+
+    ESP_ERROR_CHECK(esp_zb_zcl_set_attribute_val(
+        HVAC_ENDPOINT,
+        ESP_ZB_ZCL_CLUSTER_ID_MULTI_OUTPUT,
+        ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+        ESP_ZB_ZCL_ATTR_MULTI_OUTPUT_PRESENT_VALUE_ID,
+        &default_state,
+        false));
+
+    // Release Zigbee stack lock after modification
+    esp_zb_lock_release();
+}
+
 static void esp_zb_task(void *pvParameters)
 {
     /* initialize Zigbee stack */
-    esp_zb_cfg_t zb_nwk_cfg = ESP_ZB_ZED_CONFIG();
+    esp_zb_cfg_t zb_nwk_cfg = ESP_ZB_ZR_CONFIG();
     esp_zb_init(&zb_nwk_cfg);
-    esp_zb_on_off_light_cfg_t light_cfg = ESP_ZB_DEFAULT_ON_OFF_LIGHT_CONFIG();
-    esp_zb_ep_list_t *esp_zb_on_off_light_ep = esp_zb_on_off_light_ep_create(HA_ESP_LIGHT_ENDPOINT, &light_cfg);
-    zcl_basic_manufacturer_info_t info = {
-        .manufacturer_name = ESP_MANUFACTURER_NAME,
-        .model_identifier = ESP_MODEL_IDENTIFIER,
+    esp_zb_ieee_addr_t my_addr = {0x28, 0x52, 0x79, 0x96, 0x12, 0x9B, 0xCD, 0xEF};
+    esp_zb_set_long_address(my_addr);
+
+    esp_zb_ep_list_t *ep_list = esp_zb_ep_list_create();
+    esp_zb_endpoint_config_t endpoint_config = {
+        .endpoint = HVAC_ENDPOINT,
+        .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
+        .app_device_id = ESP_ZB_HA_CUSTOM_ATTR_DEVICE_ID,
+        .app_device_version = 0,
+    };
+    esp_zb_cluster_list_t *cluster_list = esp_zb_zcl_cluster_list_create();
+
+    /* Mandatory clusters */
+    esp_zb_cluster_list_add_basic_cluster(cluster_list, esp_zb_basic_cluster_create(NULL), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+    esp_zb_cluster_list_add_identify_cluster(cluster_list, esp_zb_identify_cluster_create(NULL), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+
+    esp_zb_attribute_list_t *basic_cluster = esp_zb_cluster_list_get_cluster(cluster_list, ESP_ZB_ZCL_CLUSTER_ID_BASIC, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+    esp_zb_basic_cluster_add_attr(basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, ESP_MANUFACTURER_NAME);
+    esp_zb_basic_cluster_add_attr(basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, ESP_MODEL_IDENTIFIER);
+
+    /* multistate output cluster */
+    esp_zb_multistate_output_cluster_cfg_t multistate_output_cfg = {
+        .number_of_states = 5,
+        .out_of_service = false,
+        .present_value = MULTISTATE_DEFAULT_STATE_VALUE,
+        .status_flags = ESP_ZB_ZCL_MULTI_VALUE_STATUS_FLAGS_NORMAL,
     };
 
-    esp_zcl_utility_add_ep_basic_manufacturer_info(esp_zb_on_off_light_ep, HA_ESP_LIGHT_ENDPOINT, &info);
-    esp_zb_device_register(esp_zb_on_off_light_ep);
+    char default_description[] = "\x11"
+                                 "Furnace control state";
+    uint32_t application_type = ESP_ZB_ZCL_MO_DOMAIN_HVAC_OFF_ON_AUTO;
+
+    esp_zb_attribute_list_t *multistate_output_cluster = esp_zb_multistate_output_cluster_create(&multistate_output_cfg);
+
+    esp_err_t ret = esp_zb_multistate_output_cluster_add_attr(multistate_output_cluster, ESP_ZB_ZCL_ATTR_MULTI_OUTPUT_DESCRIPTION_ID, (void *)default_description);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to add description attribute: 0x%x: %s", ret, esp_err_to_name(ret));
+        return;
+    }
+
+    ret = esp_zb_multistate_output_cluster_add_attr(multistate_output_cluster, ESP_ZB_ZCL_ATTR_MULTI_OUTPUT_APPLICATION_TYPE_ID, (void *)&application_type);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to add application type attribute: 0x%x: %s", ret, esp_err_to_name(ret));
+        return;
+    }
+
+    ret = esp_zb_cluster_list_add_multistate_output_cluster(cluster_list, multistate_output_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to add multistate_output_cluster: 0x%x: %s", ret, esp_err_to_name(ret));
+        return;
+    }
+
+    esp_zb_ep_list_add_ep(ep_list, cluster_list, endpoint_config);
+    esp_zb_device_register(ep_list);
     esp_zb_core_action_handler_register(zb_action_handler);
     esp_zb_set_primary_network_channel_set(ESP_ZB_PRIMARY_CHANNEL_MASK);
     ESP_ERROR_CHECK(esp_zb_start(false));
